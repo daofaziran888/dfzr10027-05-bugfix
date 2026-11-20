@@ -35,6 +35,13 @@ class ActionPayload(BaseModel):
     remark: str | None = None
 
 
+class RecoveryBatchPayload(BaseModel):
+    """失败聚合任务恢复批次提交载荷：一次可提交多条失败任务。"""
+
+    task_ids: list[int] = Field(default_factory=list)
+    remark: str | None = None
+
+
 
 class MetricDefEntry(BaseModel):
     """业务指标明细结构。"""

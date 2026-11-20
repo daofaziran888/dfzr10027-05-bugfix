@@ -4,12 +4,15 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
+from app.services.agg_recovery import RERUNNABLE_STATUS, AggRecoveryService
 from app.store import store
 
 MODULE = "agg_task"
 REQUIRED_FIELDS = ["任务编号", "目标指标", "聚合维度"]
 STATUS_ORDER = ["待调度", "计算中", "已完成", "计算失败"]
-ACTION_RULES = {"提交调度": "计算中", "取消任务": "已完成", "重跑失败": "计算失败"}
+# 普通动作只做状态流转；「重跑失败」是带真实计算的恢复动作，单独处理
+ACTION_RULES = {"提交调度": "计算中", "取消任务": "已完成"}
+RERUN_ACTION = "重跑失败"
 NEGATIVE_ACTIONS = []
 
 
@@ -51,6 +54,11 @@ class AggTaskService:
         entry = store.find(MODULE, entry_id)
         if entry is None:
             return None, f"聚合计算 {entry_id} 不存在或已归档"
+
+        # 「重跑失败」必须真实触发调度计算，不再把任务写回计算失败
+        if action == RERUN_ACTION:
+            return self._rerun_failed(entry_id, entry)
+
         if action not in ACTION_RULES:
             return None, f"动作「{action}」不属于聚合任务可执行范围"
         target = ACTION_RULES[action]
@@ -58,3 +66,21 @@ class AggTaskService:
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
         return entry, f"聚合计算已{action}"
+
+    def _rerun_failed(
+        self, entry_id: int, entry: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, str]:
+        # 调用计算前确认原运行仍处于可重跑的失败状态，已成功任务不能重新执行
+        if entry.get("status") != RERUNNABLE_STATUS:
+            return None, (
+                f"聚合计算 {entry_id} 当前状态为「{entry.get('status')}」，"
+                f"仅计算失败的任务可执行重跑"
+            )
+        # 单条重跑同样走恢复批次，保证输入绑定、回写与监控口径一致
+        batch, message = AggRecoveryService().submit_batch([entry_id])
+        if batch is None:
+            return None, message
+        item = batch["items"][0]
+        if item["status"] == RERUNNABLE_STATUS:
+            return entry, f"重跑未开跑：{item.get('error') or '计算失败'}"
+        return store.find(MODULE, entry_id), f"聚合计算已重跑（恢复批次 {batch['batch_id']}）"

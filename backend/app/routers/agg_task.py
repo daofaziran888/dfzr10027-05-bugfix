@@ -8,11 +8,13 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from app.schemas import ActionPayload, ActionResult, EntryPayload
+from app.schemas import ActionPayload, ActionResult, EntryPayload, RecoveryBatchPayload
+from app.services.agg_recovery import AggRecoveryService
 from app.services.agg_task import AggTaskService
 
 router = APIRouter(prefix="/api/agg_task", tags=["聚合任务"])
 service = AggTaskService()
+recovery_service = AggRecoveryService()
 LIST_FIELDS = ["任务编号", "目标指标", "聚合维度", "计算周期", "依赖上游", "并行度", "超时分钟", "重试上限"]
 STATUSES = ["待调度", "计算中", "已完成", "计算失败"]
 
@@ -28,6 +30,30 @@ def csv_cell(value: Any) -> str:
 def list_entries() -> dict[str, Any]:
     items = service.get_timeline()
     return {"items": items}
+
+
+@router.post("/recovery-batches")
+def submit_recovery_batch(payload: RecoveryBatchPayload) -> ActionResult:
+    """一次提交多条失败聚合任务，形成真正触发调度计算的恢复批次。"""
+    batch, message = recovery_service.submit_batch(payload.task_ids)
+    if batch is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=batch)
+
+
+@router.get("/recovery-batches")
+def list_recovery_batches() -> dict[str, Any]:
+    """监控端：按批次查看每轮真实指标数据与仍停留在失败态的任务。"""
+    items = recovery_service.list_batches()
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/recovery-batches/{batch_id}")
+def get_recovery_batch(batch_id: str) -> dict[str, Any]:
+    batch = recovery_service.get_batch(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail=f"恢复批次 {batch_id} 不存在")
+    return batch
 
 
 @router.get("/export")
